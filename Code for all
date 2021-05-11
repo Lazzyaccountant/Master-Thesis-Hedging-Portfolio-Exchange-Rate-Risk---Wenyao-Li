@@ -1,0 +1,2771 @@
+set.seed(106106)
+Sys.setlocale("LC_TIME","English")
+#step-1:Import all data and merge relevant data into one data.frame
+
+MAKEmerge.C <- function(...){
+  #merge all data into one data.frame base on calender date
+  
+  x <- list(...)
+  
+  #phase-1:obtain the date range of the data.frame
+  
+  st.Days <- data.frame()
+  ed.Days <- data.frame()
+  
+  for (i in 1:length(x)) {
+    st.Days[i,1] <- as.Date(x[[i]]$Date[1])
+    ed.Days[i,1] <- as.Date(x[[i]]$Date[nrow(x[[i]])])
+  }
+  
+  myst <- max(st.Days[,1])
+  myed <- min(ed.Days[,1])
+  
+  Day.range <- seq(myst,myed,by = "day")
+  
+  my.df <- data.frame(Date = Day.range)
+  
+  #phase-2:merge all data.frame into my.df
+  
+  for (i in 1:length(x)) {
+    my.df <- merge(my.df,x[[i]],all.x = T,all.y = F,
+                   by.x = "Date",by.y = "Date")
+  }
+  
+  #phase-3:fill na value
+  
+  return(tidyr::fill(my.df,tidyr::everything(),.direction = "downup"))
+}
+
+
+#1-1:import stock index data
+USstk <- readRDS("USstkC")
+UKstk <- readRDS("UKstkC")
+CHNstk <- readRDS("CHNstkC")
+JPNstk <- readRDS("JPNstkC")
+
+stockAll <- MAKEmerge.C(USstk,UKstk,CHNstk,JPNstk)
+
+#create vector of domestic stock index
+EURstk <- rep(1,dim(stockAll)[1])
+
+stockAll <- data.frame(stockAll,EURstk)
+
+head(stockAll)
+tail(stockAll)
+data.frame(stockAll,Day = weekdays(stockAll$Date))
+
+#1-2:import exchange rate data
+USD <- readRDS("USD_C")
+GBP <- readRDS("GBP_C")
+CNY <- readRDS("CNY_C")
+JPY <- readRDS("JPY_C")
+
+exAll <- MAKEmerge.C(USD,GBP,CNY,JPY)
+
+#1-3:create vector of domestic currency value
+EUR <- rep(1,dim(exAll)[1])
+
+exAll <- data.frame(exAll,EUR)
+
+head(exAll)
+tail(exAll)
+data.frame(exAll,Day = weekdays(exAll$Date))
+
+#1-4:extra weekends vector
+#(weekends will be showed in different languague base on
+#the computer system languague.)
+
+Wochenende <- weekdays(c(as.Date("2021-03-27"),
+                         as.Date("2021-03-28")))
+
+chinese_wochenende <- c("星期六","星期日")
+
+Wochenende <- c(Wochenende,chinese_wochenende)
+
+
+#Step-2:Choose training period and test period
+
+TDS <- 365  # training period length (unit:day)
+TES <- 365   # test period length (unit:day)
+
+#2-1create a vector of dates so that we can do rolling back test.
+theDays <- seq(as.Date("2019-01-01"),as.Date("2019-01-01")+0,by="day")
+XI <- 1
+
+TT <- theDays[XI] #TT: date of today
+
+#2-2:Divide original data.frame into training period data and 
+#test period data.
+
+Dive <- function(x,today,train.len,test.len){
+  #Dive:divide data.frame into training data and test data
+  #x:data.frame
+  #today:the date of today, must be in form of "%Y-%m-%d"
+  #train.len:choose how many days as training period.
+  #test.len:choose how many days as test period.
+  DAY <- as.Date(today,format = "%Y-%m-%d")
+  STtrain <- DAY - train.len
+  ENDtest <- DAY + test.len
+  DATAtrain <- x[x$Date %in% seq(STtrain,DAY,by = "days"),]
+  DATAtest <- x[x$Date %in% seq(DAY,ENDtest,by = "days"),]
+  return(list(DATAtrain,DATAtest))
+}
+
+the_ex <- Dive(exAll,TT,TDS,TES)
+ex_train <- the_ex[[1]]
+ex_test <- the_ex[[2]]
+
+the_stock <- Dive(stockAll,TT,TDS,TES)
+stock_train <- the_stock[[1]]
+stock_test <- the_stock[[2]]
+
+head(ex_train)
+tail(ex_train)
+
+head(stock_train)
+tail(stock_train)
+
+
+head(ex_test)
+tail(ex_test)
+
+head(stock_test)
+tail(stock_test)
+
+#Step-3:Calculate the return of financial time series
+
+Rfre <- 1 # the frequence of return(working days)
+
+trainR.log_hist <- MAKEmerge.C(stock_train,ex_train)
+head(trainR.log_hist)
+tail(trainR.log_hist)
+
+To.logR <- function(x,R.len = Rfre,work = T){
+  #To.logR:return the log return time series
+  #x:data.frame of price time series
+  #R.len:the length of the return
+  #work:default = Ture, to remove weekends in time series
+  
+  #phase-1:check if it is needed to remove weekends
+  
+  if(work){
+    
+    x <- x[!weekdays(x$Date) %in% Wochenende,]
+    
+  }
+  
+  #phase-2:calculate the log return
+  
+  xp <- x[seq(1,dim(x)[1],R.len),]
+  xp1 <- xp[-dim(xp)[1],]
+  xp2 <- xp[-1,]
+  xp2[,-1] <- log(xp2[,-1])-log(xp1[,-1])
+  return(xp2)
+  
+}
+
+
+trainR.log_hist <- To.logR(trainR.log_hist)
+
+head(data.frame(trainR.log_hist,day = weekdays(trainR.log_hist$Date)),10)
+tail(data.frame(trainR.log_hist,day = weekdays(trainR.log_hist$Date)),10)
+dim(trainR.log_hist)
+
+#Step-4:Construct given portfolios (unadjustable potfolios)
+
+POFgiven <- function(today,MYpof){
+  
+  #POFgiven:generate an equally-weighted given portfolio
+  #equally-weighted foreign portfolio, the domestic investment is 0
+  #Today:the date of today, it must be in the class of Date
+  #MYpof:data.frame of assets indexs with rownames of time
+  #and columnnames of asset.
+  
+  #generate a matrix of eqully-weighted ratios
+  w <- matrix(c(rep((1/(dim(MYpof)[2]-2)),dim(MYpof)[2]-2),0),nrow = 1,byrow = T)
+  
+  #define the column names
+  dimnames(w)[[2]] <- dimnames(MYpof)[[2]][-1]
+  
+  #return a data.frame of given portfolio
+  return(data.frame(Date = today,w))
+}
+
+pGiven <- POFgiven(TT,stock_train)
+
+#Step-5:calculate historical mean return
+
+meanR.log_train <- apply(trainR.log_hist[,-1], 2, mean)
+meanR.Ari_train <- exp(meanR.log_train)-1
+
+#Step-6:calculate historical covariance matrix
+
+M.histVAR.log_train <- cov(trainR.log_hist[,-1])
+M.histVAR.log_train
+
+#Step-7:derive risk-minimum hedge ratio (risk:VAR)
+
+#7-1:derive weight vector of nonadjustable asset
+
+eqU <- as.numeric(pGiven[1,-1]/2)
+names(eqU) <- names(pGiven[,-1])
+
+#7-2:derive weight vector of unhedged portfolio and
+#100% hedged portfolio
+
+init_No_hedge <- function(uA){
+  #init_No_hedge:generate initial point for optmization
+  #uA: nonadjustable asset data.frame(Given Portfolio)
+  aA <- uA[,-1]/2
+  aA <- aA[1,-dim(aA)[2]]
+  return(as.numeric(aA))
+}
+
+x0_unhedged <- init_No_hedge(pGiven)
+x0_100 <- c(0,0,0,0)
+
+#7-3:construct the expected return function of equivalent portfolio.
+
+eqR <- function(aA,uA,meanR){
+  #aA:weight vector of adjustable assets
+  #uA:weight vector of nonadjustable assets
+  #meanR:expected arithmatic return of all assets
+  
+  #phase-1:merge uA and aA into one vector
+  w <- c(uA,aA)
+  
+  #phase-2:calculate the weight of last aaset
+  #and include it in vector w
+  
+  w <- c(w,1 - sum(w))
+  
+  #phase-3:calculate expected return of the portfolio
+  
+  return(sum(meanR*w))
+}
+
+eqR(aA = x0_unhedged,uA = eqU, meanR = meanR.Ari_train)
+eqR(aA = x0_100,uA = eqU, meanR = meanR.Ari_train)
+
+#7-4:construct the expected variance of equivalent portfolio.
+
+eqVAR <- function(aA,uA,VAR.m){
+  #eqVAR:A function to calculate the variance of
+  #equivalent portfolio.
+  #aA:weight vector of adjustable assets
+  #uA:weight vector of nonadjustable assets
+  #VAR.m:variance-covariance matrix
+  
+  #phase-1:merge uA and aA into one vector
+  
+  w <- c(uA,aA)
+  
+  #phase-2:calculate the weight of last aaset
+  #and include it in vector w
+  
+  w <- c(w,1 - sum(w))
+  
+  #phase-3:calculate the variance of the portfolio
+  
+  return(as.numeric(t(w) %*% VAR.m %*% w))
+}
+
+eqVAR(aA = x0_unhedged, uA = eqU, VAR.m = M.histVAR.log_train)
+eqVAR(aA = x0_100, uA = eqU, VAR.m = M.histVAR.log_train)
+
+#7-5:setting constraints on expected return of hedged portfolio
+
+#In normal situation, the risk and the return are positive
+#related. In order to reduce the risk of an portflio, we have
+#to sacrifice 50% of the return to reduce the risk of portfolio.
+
+RHC <- eqR(x0_unhedged,eqU,meanR.Ari_train)*0.5
+
+#If the unhedged portflio has a negative return,then our constraint
+#on expected return of hedged portfolio is set as being greater or
+#at least equal to the expected return of unhedged portfolio.
+
+if (RHC < 0) {
+  RHC <- eqR(x0_unhedged,eqU,meanR.Ari_train)
+}
+
+#7-6:setting box constraints.
+
+maxH <- 3
+
+mylow <- x0_unhedged - maxH*x0_unhedged
+myup <- x0_unhedged + maxH*x0_unhedged
+
+l.low <- 0.5 - sum(myup)
+l.up <- 0.5 - sum(mylow)
+
+
+#8-3:construct constraint functions for mco algorithm
+
+#8-3-1::constraint on expected return of hedged portfolio
+
+cfor.R <- function(aA,uA,meanR,myC){
+  #aA:weight vector of adjustable assets
+  #uA:weight vector of nonadjustable assets
+  #meanR:expected arithmatic return of all assets
+  #myC:constraints on expected return
+  
+  #phase-1:merge uA and aA into one vector
+  
+  w <- c(uA,aA)
+  
+  #phase-2:calculate the weight of last asset
+  #and include it in vector w
+  
+  w <- c(w,1-sum(w))
+  
+  #phase-3:calculate the expected return of
+  #the portfolio
+  
+  r_p <- sum(meanR*w)
+  
+  #phase-4:check if expected return violate
+  #the constraint
+  
+  return(r_p - myC)
+}
+
+cfor.R(x0_unhedged,eqU,meanR.Ari_train,RHC)
+cfor.R(x0_100,eqU,meanR.Ari_train,RHC)
+
+#8-3-2:box constraint
+
+cfor.box <- function(aA,uA,C.U,C.L){
+  #aA:weight vector of adjustable assets
+  #uA:weight vector of nonadjustable assets
+  #C.U:constraint of upper bound
+  #C.L:constraint of lower bound
+  
+  
+  #phase-1:merge uA and aA into one vector
+  
+  w <- c(uA,aA)
+  
+  #phase-2:calculate the weight of last asset wn
+  
+  wn <- 1 - sum(w)
+  
+  #phase-3:check if wn violate the box constraint
+  
+  return(c(wn - C.L,-wn + C.U))
+}
+
+
+cfor.box(x0_unhedged,eqU,l.up,l.low)
+cfor.box(x0_100,eqU,l.up,l.low)
+
+#8-3-3:merge all constraint functions into one
+
+cformco_all <- function(x){
+  return(c(cfor.R(aA = x,uA = eqU,meanR = meanR.Ari_train ,myC = RHC),
+           cfor.box(aA = x, uA = eqU, C.U = l.up, C.L = l.low)))
+}
+
+cformco_all(x0_unhedged)
+cformco_all(x0_100)
+
+#8-4:construct multi-objective function
+
+multi.R_VAR <- function(x){
+  return(c(-eqR(aA = x, uA = eqU, meanR = meanR.Ari_train),
+           eqVAR(aA = x, uA = eqU, VAR.m = M.histVAR.log_train)))
+}
+
+multi.R_VAR(x0_unhedged)
+multi.R_VAR(x0_100)
+
+#8-5:solve the efficient frontier
+
+#8-5-1:run the mco algorithm
+
+solRtoVAR_mco <-  mco::nsga2(fn = multi.R_VAR,
+                             idim = length(x0_unhedged),
+                             odim = 2,
+                             constraints = cformco_all,
+                             cdim = 3,
+                             lower.bounds = mylow,
+                             upper.bounds = myup,
+                             popsize = 600,
+                             generations = 1200)
+
+saveRDS(solRtoVAR_mco,"solRtoVAR_mco")
+
+#8-5-2:extra all the solutions on efficient frontier
+
+efsol.RtoVAR <- solRtoVAR_mco$par
+
+#8-5-3:derive the return and risk pairs on efficient frontier
+
+frontVAR.R <- c()
+
+for (i in 1:dim(efsol.RtoVAR)[1]) {
+  frontVAR.R[i] <- eqR(aA = efsol.RtoVAR[i,],
+                       uA = eqU,
+                       meanR = meanR.Ari_train)
+}
+
+frontVAR.VAR <- c()
+
+for (i in 1:dim(efsol.RtoVAR)[1]) {
+  frontVAR.VAR[i] <- eqVAR(aA = efsol.RtoVAR[i,],
+                           uA = eqU,
+                           VAR.m = M.histVAR.log_train)
+}
+
+
+VARfront <- data.frame(R = frontVAR.R, VAR = frontVAR.VAR)
+
+RtoVAR.ratios <- VARfront$R/VARfront$VAR
+
+VARfront <- data.frame(VARfront,RtoVAR = RtoVAR.ratios,w = efsol.RtoVAR)
+
+VARfront <- VARfront[order(VARfront$VAR),]
+
+saveRDS(VARfront,"VARfront")
+
+#8-5-4:derive the optimal return-risk hedge ratio on
+#efficient frontier(maximum sharp ratio portfolio)
+
+bestRtoVAR_mco <- VARfront[VARfront$RtoVAR == max(VARfront$RtoVAR),4:dim(VARfront)[2]]
+
+bestRtoVAR_mco <- bestRtoVAR_mco[1,]
+
+bestRtoVAR_mco <- as.numeric(bestRtoVAR_mco)
+
+saveRDS(bestRtoVAR_mco,"bestRtoVAR_mco")
+
+#8-5-5:derive the risk-minimum hedge ratio (VAR)
+#on the efficient frontier
+
+bestVARmin_mco <- VARfront[VARfront$VAR == min(VARfront$VAR),4:dim(VARfront)[2]]
+bestVARmin_mco <- bestVARmin_mco[1,]
+bestVARmin_mco <- as.numeric(bestVARmin_mco)
+
+saveRDS(bestVARmin_mco,"bestVARmin_mco")
+
+#8-5-6:derive the recommaned return-risk hedge ratio (VAR)
+#on the efficient frontier
+
+x0_VAR <- eqVAR(aA = x0_unhedged,uA = eqU,VAR.m = M.histVAR.log_train)
+
+#extra the portfolios with VAR less than unhedged portfolio
+VAR_less <- VARfront[VARfront$VAR <= x0_VAR,]
+
+bestVAR.B_mco <- VAR_less[VAR_less$RtoVAR == max(VAR_less$RtoVAR),4:dim(VAR_less)[2]]
+bestVAR.B_mco <- bestVAR.B_mco[1,]
+bestVAR.B_mco <- as.numeric(bestVAR.B_mco)
+
+saveRDS(bestVAR.B_mco,"bestVAR.B_mco")
+
+#8-5-7:extra the 75% quantile portfolio in VAR_less
+
+q75VAR <- quantile(VAR_less$VAR,0.75)
+
+MYq75s <- VAR_less[VAR_less$VAR <= q75VAR,]
+
+bestVAR.q75_mco <- MYq75s[MYq75s$VAR == max(MYq75s$VAR),]
+bestVAR.q75_mco <- bestVAR.q75_mco[1,]
+bestVAR.q75_mco <- as.numeric(bestVAR.q75_mco[,4:ncol(bestVAR.q75_mco)])
+
+saveRDS(bestVAR.q75_mco,"bestVAR.q75_mco")
+
+
+#8-6:plot the efficient frontier
+
+#8-6-1:determine the xlim
+
+value_X <- list()
+
+value_X[[1]] <- eqVAR(aA = x0_unhedged, uA = eqU, VAR.m = M.histVAR.log_train)
+value_X[[2]] <- VARfront$VAR
+
+value_X <- unlist(value_X)
+
+x.length <- max(value_X)-min(value_X)
+
+x.st <- min(value_X) - x.length*0.05
+x.ed <- max(value_X) + x.length*0.05
+
+#8-6-2:determine the ylim
+
+value_Y <- list()
+
+value_Y[[1]] <- eqR(aA = x0_unhedged,uA = eqU, meanR = meanR.Ari_train)
+value_Y[[2]] <- VARfront$R
+
+value_Y <- unlist(value_Y)
+
+y.length <- max(value_Y) - min(value_Y)
+
+y.st <- min(value_Y) - y.length*0.05
+y.ed <- max(value_Y) + y.length*0.05
+
+
+#8-6-3:the efficient frointer generated by mco
+
+par(mar = c(5,4,4,8),
+    xpd = T)
+
+plot(VARfront$VAR,
+     VARfront$R,
+     xlab = "Expected Variance",
+     ylab = "Expected Return",
+     main = "Return-Variance Efficient Frontier",
+     type = "l",
+     xlim = c(x.st,x.ed),
+     ylim = c(y.st,y.ed))
+
+ourSOLs <- list(x0_unhedged,
+                bestVARmin_mco,
+                bestRtoVAR_mco,
+                bestVAR.q75_mco)
+
+
+ourLegends <- c("Unhedged","VAR.Min","Sharpe.Max","VAR.Q")
+
+ourPCHs <- c(4,2,11,1)
+
+ourColors <- c("purple","green","red","blue")
+
+for (i in 1:length(ourSOLs)) {
+  
+  points(eqVAR(ourSOLs[[i]],eqU,M.histVAR.log_train),
+         eqR(ourSOLs[[i]],eqU,meanR.Ari_train),
+         pch = ourPCHs[i],
+         col = ourColors[i],
+         cex = 2)
+  
+}
+
+
+legend("right",
+       legend = ourLegends,
+       col = ourColors,
+       pch = ourPCHs,
+       cex = 1,
+       x.intersp = 0.7,
+       y.intersp = 1,
+       bty = "n",
+       inset = c(-0.35,0))
+
+
+#step-9:derive risk-minimum hedge ratio (SV)
+#(we still make use of the equivalent portfolio
+#to estimate the return and SV of actual portfolio)
+
+#9-1:derive historical arithmetic return
+#(convert it from data.frame to matrix)
+
+M.trainR.Ari_hist <- exp(trainR.log_hist[,-1]) - 1
+M.trainR.Ari_hist <- as.matrix(M.trainR.Ari_hist)
+
+
+#9-2:construct the expected semi-varaince function
+
+eqSV <- function(aA,uA,R.m){
+  #aA:weight vector of adjustable assets
+  #uA:weight vector of unadjustable assets
+  #R.m:matrix of arithmetic return of all assets
+  
+  #phase-1:merge uA and aA into one vector
+  
+  w <- c(uA,aA)
+  
+  #phase-2:calculate the weight of last aaset
+  #and include it in vector w
+  
+  w <- c(w,1 - sum(w))
+  
+  #phase-3:calculate the semi-variance of the
+  #portfolio
+  
+  sv <- R.m %*% w
+  sv[sv > 0] <- 0
+  return(sum(sv^2)/dim(R.m)[1])
+  
+}
+
+eqSV(aA = x0_unhedged,uA = eqU, R.m = M.trainR.Ari_hist)
+
+
+#10-4:construct multi-objective function for mco algorithm
+
+multi.R_SV <- function(x){
+  return(c(-eqR(aA = x, uA = eqU, meanR = meanR.Ari_train),
+           eqSV(aA = x, uA = eqU, R.m = M.trainR.Ari_hist)))
+}
+
+multi.R_SV(x0_unhedged)
+
+#10-5:solve the efficient frontier
+
+#10-5-1:run mco algorithm
+solRtoSV_mco <-  mco::nsga2(fn = multi.R_SV,
+                            idim = length(x0_unhedged),
+                            odim = 2,
+                            constraints = cformco_all,
+                            cdim = 3,
+                            lower.bounds = mylow,
+                            upper.bounds = myup,
+                            popsize = 600,
+                            generations = 1200
+)
+
+saveRDS(solRtoSV_mco,"solRtoSV_mco")
+
+#10-5-2:extra all the solutions on efficient frontier.
+
+efsol.RtoSV <- solRtoSV_mco$par
+
+#10-5-3:derive the return and risk pairs on efficient frontier
+
+frontSV.R <- c()
+
+for (i in 1:dim(efsol.RtoSV)[1]) {
+  frontSV.R[i] <- eqR(aA = efsol.RtoSV[i,],
+                      uA = eqU,
+                      meanR = meanR.Ari_train)
+}
+
+frontSV.SV <- c()
+
+for (i in 1:dim(efsol.RtoSV)[1]) {
+  frontSV.SV[i] <- eqSV(aA = efsol.RtoSV[i,],
+                        uA = eqU,
+                        R.m = M.trainR.Ari_hist)
+}
+
+
+
+SVfront <- data.frame(R = frontSV.R,SV = frontSV.SV)
+
+RtoSV.ratios <- SVfront$R/SVfront$SV
+
+SVfront <- data.frame(SVfront,RtoSV = RtoSV.ratios,w = efsol.RtoSV)
+
+SVfront <- SVfront[order(SVfront$SV),]
+
+saveRDS(SVfront,"SVfront")
+
+#10-6:derive the optimal return-risk hedge ratio(sv)
+#on efficient frontier
+
+bestRtoSV_mco <- SVfront[SVfront$RtoSV == max(SVfront$RtoSV),4:dim(SVfront)[2]]
+
+bestRtoSV_mco <- bestRtoSV_mco[1,]
+bestRtoSV_mco <- as.numeric(bestRtoSV_mco)
+
+saveRDS(bestRtoSV_mco,"bestRtoSV_mco")
+
+#10-7:derive the risk-minimum hedge ratio(sv) on
+#efficient frontier
+
+bestSVmin_mco <- SVfront[SVfront$SV == min(SVfront$SV),4:dim(SVfront)[2]]
+bestSVmin_mco <- bestSVmin_mco[1,]
+bestSVmin_mco <- as.numeric(bestSVmin_mco)
+
+saveRDS(bestSVmin_mco,"bestSVmin_mco")
+
+#10-8:derive the recommended return-risk hedge ratio(sv)
+#on efficient frontier
+
+x0_SV <- eqSV(x0_unhedged,eqU,M.trainR.Ari_hist)
+
+#extra the portfolios with SV less than unhedged portfolio
+SV_less <- SVfront[SVfront$SV <= x0_SV,]
+
+bestSV.B_mco <- SV_less[SV_less$RtoSV == max(SV_less$RtoSV),4:dim(SV_less)[2]]
+
+bestSV.B_mco <- bestSV.B_mco[1,]
+
+bestSV.B_mco <- as.numeric(bestSV.B_mco)
+
+saveRDS(bestSV.B_mco,"bestSV.B_mco")
+
+#extra the 75% quantile portfolio in SV_less
+
+qSV75 <- quantile(SV_less$SV,0.75)
+
+MYsv75q <- SV_less[SV_less$SV <= qSV75,]
+
+bestSV.q75_mco <- MYsv75q[MYsv75q$SV == max(MYsv75q$SV),]
+
+bestSV.q75_mco <- bestSV.q75_mco[1,]
+
+bestSV.q75_mco <- as.numeric(bestSV.q75_mco[,4:ncol(bestSV.q75_mco)])
+
+saveRDS(bestSV.q75_mco,"bestSV.q75_mco")
+
+#10-9:plot the effcient frontier
+
+#10-9-1:determine the xlim
+
+value_X <- list()
+
+value_X[[1]] <- eqSV(aA = x0_unhedged, uA = eqU, R.m = M.trainR.Ari_hist)
+value_X[[2]] <- SVfront$SV
+
+
+value_X <- unlist(value_X)
+
+x.length <- max(value_X)-min(value_X)
+
+x.st <- min(value_X) - x.length*0.05
+x.ed <- max(value_X) + x.length*0.05
+
+#10-9-2:determine the ylim
+
+value_Y <- list()
+
+value_Y[[1]] <- eqR(aA = x0_unhedged,uA = eqU, meanR = meanR.Ari_train)
+value_Y[[2]] <- SVfront$R
+
+value_Y <- unlist(value_Y)
+
+y.length <- max(value_Y) - min(value_Y)
+
+y.st <- min(value_Y) - y.length*0.05
+y.ed <- max(value_Y) + y.length*0.05
+
+
+#10-9-3:plot the efficient frointer generated by mco
+plot(SVfront$SV,
+     SVfront$R,
+     xlab = "Expected Semivariance",
+     ylab = "Expected Return",
+     main = "Return-Semivariance Efficient Frontier",
+     type = "l",
+     xlim = c(x.st,x.ed),
+     ylim = c(y.st,y.ed))
+
+ourSOLs <- list(x0_unhedged,
+                bestSVmin_mco,
+                bestRtoSV_mco,
+                bestSV.q75_mco)
+
+ourLegends <- c("Unhedged","SV.Min","Sharpe.Max","SV.Q")
+
+for (i in 1:length(ourSOLs)) {
+  
+  points(eqSV(ourSOLs[[i]],eqU,M.trainR.Ari_hist),
+         eqR(ourSOLs[[i]],eqU,meanR.Ari_train),
+         pch = ourPCHs[i],
+         col = ourColors[i],
+         cex = 2)
+  
+}
+
+
+legend("right",
+       legend = ourLegends,
+       col = ourColors,
+       pch = ourPCHs,
+       cex = 1,
+       x.intersp = 0.7,
+       y.intersp = 1,
+       bty = "n",
+       inset = c(-0.35,0)
+)
+
+
+
+#10-9-4:calculate the vertical distance
+
+VAR_HR <- tail(VAR_less,1)$R
+SV_HR <- tail(SV_less,1)$R
+
+R0_insample <- eqR(aA = x0_unhedged, 
+                   uA = eqU, 
+                   meanR = meanR.Ari_train)
+
+V_VAR <- VAR_HR - R0_insample
+V_SV <- SV_HR - R0_insample
+
+(V_SV - V_VAR)/V_VAR
+
+#step-11:back test
+
+#11-1:determine which hedged ratios is going to be
+#used in back test
+
+minVAR <- bestVARmin_mco
+minSV <- bestSVmin_mco
+
+q.VAR <- bestVAR.q75_mco
+q.SV <- bestSV.q75_mco
+
+#11-2:convert solution to hedge ratio
+
+SOLtoH <- function(tg,uh){
+  #tg:targed weight vector
+  #uh:unhedged weight vector
+  
+  z <- tg - uh
+  
+  return((uh-tg)/uh)
+}
+
+h.no <- SOLtoH(tg = x0_unhedged,uh = x0_unhedged)
+h.VARmin <- SOLtoH(tg = minVAR,uh = x0_unhedged)
+h.SVmin <- SOLtoH(tg = minSV,uh = x0_unhedged)
+h.VARq <- SOLtoH(tg = q.VAR, uh = x0_unhedged)
+h.SVq <- SOLtoH(tg = q.SV, uh = x0_unhedged)
+
+hedge.ratios_in <- rbind(h.no,h.VARmin,h.SVmin,h.VARq,h.SVq)
+
+colnames(hedge.ratios_in) <- colnames(ex_train)[c(-1,-ncol(ex_train))]
+
+saveRDS(hedge.ratios_in,"hedge.ratios_in")
+
+rio::export(hedge.ratios_in,"hedge.ratios_in.xlsx",row.names = T)
+
+#11-3:obtain actual portfolio
+
+asset.names <- colnames(trainR.log_hist)[-1]
+
+HtoP <- function(h.plan,H.tg,A.names){
+  #h.plan:vector of hedge ratios
+  #H.tg:hedge target assets(data.frame)
+  #A.names:vector of asset names
+  
+  z <- as.numeric(H.tg[,c(-1,-dim(H.tg)[2])]*(-h.plan))
+  z <- c(z,0-sum(z))
+  z <- matrix(z,byrow = T,nrow = 1)
+  
+  myp <- cbind(H.tg,z)
+  colnames(myp)[-1] <- A.names
+  
+  return(myp)
+}
+
+
+pNO <- HtoP(h.no,pGiven,asset.names)
+pVARmin <- HtoP(h.VARmin,pGiven,asset.names)
+pSVmin <- HtoP(h.SVmin,pGiven,asset.names)
+pVARq <- HtoP(h.VARq,pGiven,asset.names)
+pSVq <- HtoP(h.SVq,pGiven,asset.names)
+
+testPOFs.in <- rbind(pNO,pVARmin,pSVmin,pVARq,pSVq)
+
+hedgeNames <- c("Unhedged","VAR.min","SV.min","VAR.q","SV.q")
+
+testPOFs.in <- data.frame(POF = hedgeNames,testPOFs.in[,-1])
+
+saveRDS(testPOFs.in,"testPOFs.in")
+
+
+#11-4:construct back test function
+
+#11-4-1:merge stock index time series and
+#exchange rate time series data first
+
+TS_train <- MAKEmerge.C(stock_train,ex_train)
+
+head(data.frame(TS_train,day = weekdays(TS_train$Date)),20)
+
+#11-4-2:construct the backtest function
+
+backtest <- function(pof,d.ts){
+  #pof:data.frame of portfolio
+  #d.ts:data.frame of asset price time series
+  
+  #phase-1:extra asset prices on t = 0 (today)
+  t0prices <- d.ts[1,]
+  
+  #phase-2:define Rsub function
+  Rsub <- function(x){
+    return((x - t0prices[,-1])/t0prices[,-1])
+  }
+  
+  #phase-3:calculate the accumated arithmetic
+  #return for each day.
+  
+  CR <- apply(d.ts[,-1],1,Rsub)
+  CR <- do.call(rbind,CR)
+  CR <- data.frame(Date = d.ts$Date,CR)
+  CR[,-1] <- 1+CR[,-1]
+  
+  #phase-4:We need to adjust the accumated return
+  #of international equity.
+  
+  CR_F <- CR[,2:(ncol(CR[,-1])/2)]
+  CR_EX <- CR[,((ncol(CR[,-1])/2)+2):(ncol(CR)-1)]
+  
+  CR[,2:(ncol(CR[,-1])/2)] <- CR_F*CR_EX
+  
+  #phase-5:construct PR function
+  
+  PR <- function(x){
+    return(sum(pof[,-1]*x))
+  }
+  
+  #phase-6:calculate the accumulated return of
+  #the portfolio.
+  
+  R_daily <- apply(CR[,-1], 1, PR)
+  return(data.frame(Date = CR$Date,R = R_daily))
+}
+
+
+#11-5:run the backtest function (in sample test)
+
+#11-5-1:run backtest for each portfolios
+
+bk_NO <- backtest(pof = pNO,d.ts = TS_train)
+bk_VARmin <- backtest(pof = pVARmin,d.ts = TS_train)
+bk_SVmin <- backtest(pof = pSVmin,d.ts = TS_train)
+bk_VARq <- backtest(pof = pVARq,d.ts = TS_train)
+bk_SVq <- backtest(pof = pSVq,d.ts = TS_train)
+
+
+head(data.frame(bk_SVq,Day = weekdays(bk_SVq$Date)),15)
+
+#11-5-2:determine the ylim
+
+value_Y <- list()
+
+mybt_in <- list(bk_NO,
+                bk_VARmin,
+                bk_SVmin,
+                bk_VARq,
+                bk_SVq)
+
+names(mybt_in) <- c("Unhedged",
+                    "VAR.Min",
+                    "SV.Min",
+                    "VAR.Q",
+                    "SV.Q")
+
+saveRDS(mybt_in,"mybt_in")
+
+for (i in 1:length(mybt_in)) {
+  value_Y[[i]] <- mybt_in[[i]]$R 
+}
+
+value_Y <- unlist(value_Y)
+
+y.length <- max(value_Y) - min(value_Y)
+
+y.st <- min(value_Y) - y.length*0.05
+y.ed <- max(value_Y) + y.length*0.05
+
+#11-5-3:plot the unhedged portfolio
+
+plot(bk_NO$Date,bk_NO$R,ylim = c(y.st,y.ed),type = "l",
+     xlab = "Date",
+     ylab = "Portfolio Value",
+     main = "Backtest ( In Sample )")
+
+myLabels <- names(mybt_in)
+
+myLTYs <- c(1,1,1,1,1)
+
+myCOls <- c("Black","green","blue","red","orange")
+
+for (i in 2:length(myLabels)) {
+  lines(mybt_in[[i]]$Date,mybt_in[[i]]$R,col = myCOls[i])
+}
+
+legend("right",legend = myLabels,col = myCOls,lty = myLTYs,
+       cex = 1,
+       y.intersp = 1,
+       x.intersp = 0.7,
+       bty = "n",
+       inset = c(-0.35,0))
+
+#step-12:back test analysis
+
+#12-1:merge all backtest result into one data.frame
+
+fen_in <- data.frame(Date = mybt_in$Unhedged$Date,
+                     unhedged = mybt_in$Unhedged$R,
+                     VARmin = mybt_in$VAR.Min$R,
+                     SVmin = mybt_in$SV.Min$R,
+                     VAR.q = mybt_in$VAR.Q$R,
+                     SV.q = mybt_in$SV.Q$R)
+
+head(data.frame(Day = weekdays(fen_in$Date),fen_in),15)
+
+#12-2:obtain the final return of each portfolio
+
+Final.Return_in <- fen_in[nrow(fen_in),-1]
+
+
+Final.Return_in <- Final.Return_in - 1
+
+rownames(Final.Return_in) <- "Final Return"
+
+
+#12-2-1:determin k.in and w.in
+
+k.in <- 1
+w.in <- 7
+
+#12-3:analyses the return performance
+
+#12-3-1:calculate the k-day log return(weekend excluded)
+
+
+To.logR.bt <- function(x,R.len){
+  #x:data.frame of backtest result with Date
+  #R.len: the length
+  
+  #phase-1:extra the working days
+  
+  x.work <- x[!weekdays(x[,1]) %in% Wochenende,]
+  
+  #phase-2:calculate the k day log return during working days
+  
+  my.need <- seq(1,nrow(x.work),R.len)
+  x.wk <- x.work[my.need,]
+  
+  x.wk.1 <- x.wk[-nrow(x.wk),]
+  x.wk.2 <- x.wk[-1,]
+  
+  x.logR.mid <- x.wk.2
+  
+  x.logR.mid[,-1] <- log(x.wk.2[,-1]) - log(x.wk.1[,-1])
+  
+  #phase-2:check if we need to process the tail of
+  #x.wk
+  
+  x.logR.tail <- data.frame()
+  
+  if(MYtail <- nrow(x.work) != my.need[length(my.need)]){
+    
+    tT.price <- tail(x.work,1)
+    
+    tT.price
+    tT_1.price <- tail(x.wk.2,1)
+    
+    R.adjust <- (nrow(x.work) - my.need[length(my.need)])/R.len
+    
+    x.logR.tail <- tT.price
+    x.logR.tail[,-1] <- (log(tT.price[,-1]) - log(tT_1.price[,-1]))*R.adjust
+  }
+  
+  
+  #phase-3:to check if t = 0 is on weekends
+  
+  x.logR.head <- data.frame()
+  
+  WK.check <- weekdays(head(x[1,1],1)) %in%  Wochenende
+  
+  if (WK.check) {
+    #if t = 0 is weekends on holiday, we need to calculate
+    # the log return of t = 1  first.
+    
+    t1.price <- x[!weekdays(x[,1]) %in% Wochenende,]
+    
+    t1.price <- head(t1.price,1)
+    
+    t0.price <- head(x,1)
+    
+    x.logR.head <- t1.price
+    
+    x.logR.head[,-1] <- (log(t1.price[,-1]) - log(t0.price[,-1]))/R.len
+  }
+  
+  return(rbind(x.logR.head,
+        x.logR.mid,
+        x.logR.tail))
+}
+
+
+rLOG.k_in <- To.logR.bt(fen_in,R.len = k.in)
+
+head(data.frame(Day = weekdays(rLOG.k_in$Date),rLOG.k_in),14)
+
+#12-3-2:calculate the mean of k-day log return
+
+rLOG.k_in.mean <- apply(rLOG.k_in[,-1], 2, mean)
+
+rLOG.k_in.mean <- matrix(rLOG.k_in.mean,nrow = 1,byrow = T,
+                       dimnames = list("LogR.k.mean",names(rLOG.k_in.mean)))
+
+
+rLOG.k_in.mean <- as.data.frame(rLOG.k_in.mean)
+
+rLOG.k_in.mean
+
+#12-3-3:t-test on k-day log return
+
+BKnames <- colnames(rLOG.k_in)[-1]
+
+rLOG.k_in.Ttest <- list()
+
+for (i in 1:length(BKnames)) {
+  
+  result_T <- t.test(rLOG.k_in[,2],rLOG.k_in[,i+1])
+  rLOG.k_in.Ttest[[i]] <- result_T$p.value
+  
+}
+
+rLOG.k_in.Ttest <- do.call(cbind,rLOG.k_in.Ttest)
+
+dimnames(rLOG.k_in.Ttest) <- list("LogR.k.Ttest",BKnames)
+
+rLOG.k_in.Ttest
+
+#12-3-4:calculate the mean of daily Cumulative return
+
+
+DCR_in <- fen_in[!weekdays(fen_in$Date)%in% Wochenende,]
+DCR_in[,-1] <- DCR_in[,-1] - 1
+
+
+DCR_in.mean <- matrix(apply(DCR_in[,-1],2,mean),nrow = 1,byrow = T,
+                      dimnames = list("DCR.mean",colnames(DCR_in)[-1]))
+
+DCR_in.mean
+
+#12-3-5:do a t test on DCR_in
+
+BKnames <-  colnames(DCR_in)[-1]
+
+DCR_in.Ttest <- list()
+
+for (i in 1:length(BKnames)) {
+  
+  result_T <- t.test(DCR_in[,2],DCR_in[,i+1])
+  DCR_in.Ttest[[i]] <- result_T$p.value
+  
+}
+
+DCR_in.Ttest <- do.call(cbind,DCR_in.Ttest)
+dimnames(DCR_in.Ttest) <- list("DCR.Ttest",BKnames)
+
+DCR_in.Ttest
+
+#12-4:rbind all data.frame and finish the
+#return performance analysis
+
+Final.Return_in
+rLOG.k_in.mean
+rLOG.k_in.Ttest
+DCR_in.mean
+DCR_in.Ttest
+
+Perform.R <- rbind(Final.Return_in,
+                   rLOG.k_in.mean,
+                   rLOG.k_in.Ttest,
+                   DCR_in.mean,
+                   DCR_in.Ttest)
+
+saveRDS(Perform.R,"Perform.R")
+
+Perform.R
+
+rio::export(Perform.R,"Perform.R.xlsx",row.names = T)
+
+
+#12-5:start analysing risk performance
+
+#12-5-1:construct maximum loss function and calculate
+#the maximum loss of backtest.
+
+ML <- function(d.ts){
+  #ML:calculate current loss on each day
+  
+  loss <- list() 
+  
+  for (i in 1:nrow(d.ts)) {
+    
+    ts_all <- as.data.frame(d.ts[1:i,-1])
+    
+    p_today <- as.data.frame(d.ts[i,-1])
+    
+    peak_now <- apply(ts_all, 2, max)
+    
+    loss[[i]] <- p_today - peak_now
+    
+  }
+  
+  loss <- do.call(rbind,loss)
+  
+  result <- data.frame(Date = d.ts$Date,loss)
+  
+  colnames(result) <- colnames(d.ts)
+  
+  return(result)
+}
+
+MML <- function(d.ts){
+  #MML:calculate the maximum loss during the test
+  #period
+  
+  loss <- list() 
+  
+  for (i in 1:nrow(d.ts)) {
+    
+    ts_all <- as.data.frame(d.ts[1:i,-1])
+    
+    p_today <- as.data.frame(d.ts[i,-1])
+    
+    peak_now <- apply(ts_all, 2, max)
+    
+    loss[[i]] <- p_today - peak_now
+    
+  }
+  
+  loss <- do.call(rbind,loss)
+  
+  result <- data.frame(Date = d.ts$Date,loss)
+  
+  colnames(result) <- colnames(d.ts)
+  
+  if(ncol(result) == 2){
+    myMML <- min(result[,-1])
+    names(myMML) <- colnames(result)[2]
+    return(myMML)
+  }else{
+    return(apply(result[,-1], 2, min))
+  }
+}
+
+
+mml_in <- matrix(MML(fen_in),nrow = 1,byrow = T)
+dimnames(mml_in) <- list("MML",colnames(fen_in)[-1])
+mml_in <- as.data.frame(mml_in)
+
+mml_in
+
+#12-5-2:construct the function to calculate the maximum
+#dropdown MDD and daily current dropdown DD
+
+DD <- function(d.ts){
+  #DD:return the current dropdown for each day
+  #phase-1:calculate current dropdown
+  
+  CD <- list() 
+  
+  for (i in 1:nrow(d.ts)) {
+    
+    ts_all <- as.data.frame(d.ts[1:i,-1])
+    
+    p_today <- as.data.frame(d.ts[i,-1])
+    
+    peak_now <- apply(ts_all, 2, max)
+    
+    drop_today <- p_today - peak_now
+    
+    CD[[i]] <- drop_today/peak_now
+  }
+  
+  CD <- do.call(rbind,CD)
+  CD <- data.frame(Date = d.ts$Date,CD)
+  colnames(CD) <- colnames(d.ts)
+  
+  return(CD)
+}
+
+
+MDD <- function(d.ts){
+  
+  #phase-1:calculate current dropdown on each day
+  
+  CD <- list() 
+  
+  for (i in 1:nrow(d.ts)) {
+    
+    ts_all <- as.data.frame(d.ts[1:i,-1])
+    
+    p_today <- as.data.frame(d.ts[i,-1])
+    
+    peak_now <- apply(ts_all, 2, max)
+    
+    drop_today <- p_today - peak_now
+    
+    CD[[i]] <- drop_today/peak_now
+  }
+  
+  CD <- do.call(rbind,CD)
+  CD <- data.frame(Date = d.ts$Date,CD)
+  colnames(CD) <- colnames(d.ts) 
+  
+  #phase-2:calculate the maximum dropdown
+  
+  if (ncol(CD) == 2) {
+    
+    myMDD <- min(CD[,-1])
+    names(myMDD) <- colnames(CD)[2]
+    return(myMDD)
+    
+  }else{
+    
+    return(apply(CD[,-1], 2, min))
+    
+  }
+  
+}
+
+mdd_in <- MDD(fen_in)
+mdd_in <- matrix(mdd_in,nrow = 1,byrow = T,
+                 dimnames = list("MDD",colnames(fen_in[-1])))
+mdd_in <- as.data.frame(mdd_in)
+
+mdd_in
+
+#12-5-3:calculate the variance of k-days log return
+
+rLOG.k_in.VAR <- apply(rLOG.k_in[,-1], 2, var)
+
+
+rLOG.k_in.VAR <- matrix(rLOG.k_in.VAR,nrow = 1,byrow = T,
+                      dimnames = list("logR.k.VAR",
+                                      colnames(rLOG.k_in)[-1]))
+
+
+rLOG.k_in.VAR <- as.data.frame(rLOG.k_in.VAR)
+
+rLOG.k_in.VAR
+
+#12-5-4:calculate the semi-variance of daily log return
+
+#12-5-4-1:construct semi-variance function
+
+semiVAR <- function(x,tg = 0){
+  x[x>tg] <- 0
+  x <- x^2
+  return(mean(x))
+}
+
+#12-5-4-2:calculate the semi-variance of Rfre-days log return
+
+rLOG.k_in.semiVAR <- apply(rLOG.k_in[,-1], 2, semiVAR)
+
+rLOG.k_in.semiVAR <- matrix(rLOG.k_in.semiVAR,nrow = 1, byrow = T,
+                          dimnames = list("logR.k.semiVAR",
+                                          colnames(rLOG.k_in)[-1]))
+
+rLOG.k_in.semiVAR <- as.data.frame(rLOG.k_in.semiVAR)
+
+rLOG.k_in.semiVAR
+
+#12-5-5:calculate the rolling variance of w-day log return
+
+#12-5-6:setting the window lenth
+
+rol.length <- w.in
+
+bt.log.daily_in <- To.logR.bt(fen_in,R.len = 1)
+
+
+#12-5-6:calculate the rolling variance
+
+rLOG_in.rolVAR <- zoo::rollapply(bt.log.daily_in[,-1],
+                                 width = rol.length,
+                                 var)
+
+rol.st <- nrow(bt.log.daily_in) - nrow(rLOG_in.rolVAR) + 1
+
+rLOG_in.rolVAR <- data.frame(Date = bt.log.daily_in$Date[rol.st:nrow(bt.log.daily_in)],
+                             rLOG_in.rolVAR)
+
+dim(bt.log.daily_in) - dim(rLOG_in.rolVAR)
+
+
+#12-5-7:plot the line graph
+
+#12-5-7-1:determine the ylim
+
+value_Y <- list()
+
+for (i in 1:(ncol(rLOG_in.rolVAR)-1)) {
+  
+  value_Y[[i]] <- rLOG_in.rolVAR[,i+1]
+  
+}
+
+value_Y <- unlist(value_Y)
+
+y.length <- max(value_Y) - min(value_Y)
+
+y.st <- min(value_Y) - y.length*0.05
+y.ed <- max(value_Y) + y.length*0.05
+
+#12-5-7-1:plotting
+
+plot(rLOG_in.rolVAR$Date,rLOG_in.rolVAR$unhedged,type = "l",
+     main = "7-day Rolling Average Variance of Daily Log Return",
+     xlab = "Date",
+     ylab = "Variance",
+     ylim = c(y.st,y.ed)
+)
+
+
+myColar <- c("black","green","blue","red","orange")
+
+for (i in 1:length(myColar)) {
+  lines(rLOG_in.rolVAR$Date,rLOG_in.rolVAR[,i+1],col = myColar[i])
+}
+
+legend("right",legend = myLabels,col = myColar,lty = myLTYs,
+       cex = 1,
+       y.intersp = 1,
+       x.intersp = 0.7,
+       bty = "n",
+       inset = c(-0.35,0))
+
+#12-5-8:calculate the mean of rolling VAR
+
+rolVAR_mean <- matrix(apply(rLOG_in.rolVAR[,-1], 2, mean),nrow = 1,byrow = T,
+                      dimnames = list("rolVAR_mean",colnames(rLOG_in.rolVAR)[-1]))
+
+rolVAR_mean
+
+#12-5-9:t test on rolling VAR
+
+rolVAR_t.Test <- matrix(rep(NA,ncol(rLOG_in.rolVAR)-1),byrow = T,
+                        nrow = 1,
+                        dimnames = list("rolVAR_P",colnames(rLOG_in.rolVAR)[-1]))
+
+
+for (i in 1:ncol(rolVAR_t.Test)) {
+  
+  myTEST <- t.test(rLOG_in.rolVAR[,2],rLOG_in.rolVAR[,1+i])
+  rolVAR_t.Test[1,i] <- myTEST$p.value
+  
+}
+
+rolVAR_t.Test
+
+
+#12-5-10:calculate rolling semi-variance
+
+
+rLOG_in.rolsemiVAR <- zoo::rollapply(bt.log.daily_in[,-1],
+                                     width = rol.length,semiVAR)
+
+rLOG_in.rolsemiVAR <- data.frame(Date = bt.log.daily_in$Date[rol.st:nrow(bt.log.daily_in)],rLOG_in.rolsemiVAR)
+
+
+dim(bt.log.daily_in) - dim(rLOG_in.rolsemiVAR)
+
+
+#12-5-11:calculate the mean of rolling semi-variance
+
+rolsemiVAR_mean <- matrix(apply(rLOG_in.rolsemiVAR[,-1], 2, mean),nrow = 1,byrow = T,
+                          dimnames = list("rolsemiVAR_mean",colnames(rLOG_in.rolsemiVAR)[-1]))
+
+rolsemiVAR_mean
+
+#12-5-12:plot the rolling semi-variance
+
+value_Y <- list()
+
+for (i in 1:(ncol(rLOG_in.rolsemiVAR)-1)) {
+  
+  value_Y[[i]] <- rLOG_in.rolsemiVAR[,i+1]
+  
+}
+
+value_Y <- unlist(value_Y)
+
+y.length <- max(value_Y) - min(value_Y)
+
+y.st <- min(value_Y) - y.length*0.05
+y.ed <- max(value_Y) + y.length*0.05
+
+plot(rLOG_in.rolVAR$Date,rLOG_in.rolsemiVAR$unhedged,type = "l",
+     xlab = "Date",
+     ylab = "Semivariance",
+     main = "7-day Rolling Average SV of Daily Log Return",
+     ylim = c(y.st,y.ed))
+
+for (i in 1:length(myColar)) {
+  lines(rLOG_in.rolsemiVAR$Date,rLOG_in.rolsemiVAR[,i+1],col = myColar[i])
+}
+
+legend("right",legend = myLabels,col = myColar,lty = myLTYs,
+       cex = 1,
+       y.intersp = 1,
+       x.intersp = 0.7,
+       bty = "n",
+       inset = c(-0.35,0))
+
+#12-5-13:t-test on rolling semi-variance
+
+rolsemiVAR_t.Test <- matrix(rep(NA,ncol(rLOG_in.rolsemiVAR)-1),byrow = T,
+                            nrow = 1,
+                            dimnames = list("rolsemiVAR_P",colnames(rLOG_in.rolsemiVAR)[-1]))
+
+
+for (i in 1:ncol(rolsemiVAR_t.Test)) {
+  
+  myTEST <- t.test(rLOG_in.rolsemiVAR[,2],rLOG_in.rolsemiVAR[,i+1])
+  rolsemiVAR_t.Test[1,i] <- myTEST$p.value
+  
+}
+
+rolsemiVAR_t.Test
+
+#12-5-14:summarize the risk performence
+
+Perform.risk <- list(mml_in,mdd_in,
+                     rLOG.k_in.VAR,
+                     rolVAR_mean,
+                     rolVAR_t.Test,
+                     rLOG.k_in.semiVAR,
+                     rolsemiVAR_mean,
+                     rolsemiVAR_t.Test)
+
+Perform.risk <- do.call(rbind,Perform.risk)
+
+saveRDS(Perform.risk,"Perform.risk")
+
+Perform.risk
+
+rio::export(Perform.risk,"Perform.risk.xlsx",row.names = T)
+
+
+#12-5-15:t test between SV and VAR regarding k-day
+# log return
+
+rLOG.k_in$VARmin
+rLOG.k_in$SVmin
+
+P.VARmin.vs.SVmin_logR.in <- t.test(rLOG.k_in$VARmin,rLOG.k_in$SVmin)$p.value
+
+rLOG.k_in$VAR.q
+rLOG.k_in$SV.q
+
+P.VARq.vs.SVq_logR.in <- t.test(rLOG.k_in$VAR.q,rLOG.k_in$SV.q)$p.value
+
+#12-5-16:VAR vs SV regarding daily cumulative return
+
+DCR_in$VARmin
+DCR_in$SVmin
+
+P.VARmin.vs.SVmin_DCR.in <- t.test(DCR_in$VARmin,DCR_in$SVmin)$p.value
+
+P.VARq.vs.SVq_DCR.in <- t.test(DCR_in$VAR.q,DCR_in$SV.q)$p.value
+
+
+#12-5-17:save P value of VAR vs SV in return performence
+
+
+VAR.vs.SV_R.in <- rbind(P.VARmin.vs.SVmin_logR.in,
+                        P.VARq.vs.SVq_logR.in,
+                        P.VARmin.vs.SVmin_DCR.in,
+                        P.VARq.vs.SVq_DCR.in)
+
+colnames(VAR.vs.SV_R.in) <- "P.value"
+
+
+saveRDS(VAR.vs.SV_R.in,"VAR.vs.SV_R.in")
+
+#12-5-18: t test on the risk performance between VAR and
+#SV
+
+P.VARmin.vs.SVmin_rolVAR.in <- t.test(rLOG_in.rolVAR$VARmin,
+                                      rLOG_in.rolVAR$SVmin)$p.value
+
+P.VARq.vs.SVq_rolVAR.in <- t.test(rLOG_in.rolVAR$VAR.q,
+                                  rLOG_in.rolVAR$SV.q)$p.value
+
+
+P.VARmin.vs.SVmin_rolsemiVAR.in <- t.test(rLOG_in.rolsemiVAR$VARmin,
+                                          rLOG_in.rolsemiVAR$SVmin)$p.value
+
+P.VARq.vs.SVq_rolsemiVAR.in <- t.test(rLOG_in.rolsemiVAR$VAR.q,
+                                      rLOG_in.rolsemiVAR$SV.q)$p.value
+
+
+VAR.vs.SV_Risk.in <- rbind(P.VARmin.vs.SVmin_rolVAR.in,
+                           P.VARq.vs.SVq_rolVAR.in,
+                           P.VARmin.vs.SVmin_rolsemiVAR.in,
+                           P.VARq.vs.SVq_rolsemiVAR.in)
+
+colnames(VAR.vs.SV_Risk.in) <- "P.value"
+
+
+saveRDS(VAR.vs.SV_Risk.in,"VAR.vs.SV_Risk.in")
+
+VAR.vs.SV_R.in
+VAR.vs.SV_Risk.in
+
+#step-13-variance decomposition
+
+var.Decompose <- function(aA,uA,M.VAR) {
+  #phase-1:obtain the full vector
+  
+  pof <- c(uA,aA)
+  
+  pof <- c(pof,1 - sum(pof))
+  
+  pof <- as.matrix(pof)
+  
+  
+  #phase-2:decomposite the covariance matrix
+  
+  #2-1:derive M.co
+  
+  M.co <- M.VAR
+  
+  M.co[1:(nrow(M.co)/2),1:(ncol(M.co)/2)] <- 0
+  M.co[((nrow(M.co)/2)+1):nrow(M.co),((ncol(M.co)/2)+1):ncol(M.co)] <- 0
+  
+  
+  #2-2:derive M.fa
+  
+  M.fa <- M.VAR - M.co
+  M.fa[((nrow(M.fa)/2)+1):nrow(M.fa),((ncol(M.fa)/2)+1):ncol(M.fa)] <- 0
+  
+  #2-3:derive M.ex
+  
+  M.ex <- M.VAR - M.co - M.fa
+  
+  #phase-3:calculate the variance of each part
+  
+  VAR.all <- as.numeric(t(pof) %*% M.VAR %*% pof)
+  
+  VAR.stock <- as.numeric(t(pof) %*% M.fa %*% pof)
+  
+  VAR.ex <- as.numeric(t(pof) %*% M.ex %*% pof)
+  
+  VAR.covar <- as.numeric(t(pof) %*% M.co %*% pof)
+  
+  #phase-4:store the data.
+  
+  k1 <- data.frame(Total = VAR.all, 
+                   stock = VAR.stock,
+                   ex = VAR.ex,
+                   cov = VAR.covar)
+  
+  
+  k2 <- data.frame(Total = VAR.all/VAR.all,
+                   stock = VAR.stock/VAR.all,
+                   ex = VAR.ex/VAR.all,
+                   cov = VAR.covar/VAR.all)
+  
+  
+  k <- rbind(k1,k2)
+  
+  rownames(k) <- c("Absolute Value","Percentage Value")
+  
+  return(k)
+}
+
+x0_100
+x0_unhedged
+bestVARmin_mco
+
+decom.unhedged.in <- var.Decompose(aA = x0_unhedged,
+                                uA = eqU,
+                                M.VAR = M.histVAR.log_train)
+
+decom.full.in <- var.Decompose(aA = x0_100,
+                               uA = eqU,
+                               M.VAR = M.histVAR.log_train)
+
+decom.VARmin.in <- var.Decompose(aA = bestVARmin_mco,
+                                 uA = eqU,
+                                 M.VAR = M.histVAR.log_train)
+decom.unhedged.in
+decom.full.in
+decom.VARmin.in
+
+rio::export(decom.unhedged.in,"decom.unhedged.in.xlsx",row.names = T)
+rio::export(decom.full.in,"decom.full.in.xlsx",row.names = T)
+
+
+rio::export(VAR.vs.SV_R.in,"VAR.vs.SV_R.in.xlsx",row.names = T)
+rio::export(VAR.vs.SV_Risk.in,"VAR.vs.SV_Risk.in.xlsx",row.names = T)
+
+
+#step-14:skewness analysis
+
+skewness <- function(x){
+  x <- rnorm(10000)
+  
+  sk <- mean(((x - mean(x))/sd(x))^3)
+  
+  return(sk)
+}
+
+
+sk.in.all <- apply(trainR.log_hist[,-1], 2, skewness)
+
+par(mfrow = c(2,2))
+par(mar = c(5,4,4,2),
+    xpd = F)
+
+plot(density(trainR.log_hist$USD),main = "USD KDE")
+plot(density(trainR.log_hist$GBP),main = "GBP KDE")
+plot(density(trainR.log_hist$CNY),main = "CNY KDE")
+plot(density(trainR.log_hist$JPY),main = "JPY KDE")
+
+par(mfrow = c(1,1),mar = c(5,4,4,8),xpd = T)
+
+
+###############################
+#Simulation-Historical Method
+###############################
+
+#step-1:determine the training period and extra
+#the time series of training period
+
+train_len <- 913    #(unit:days - calender day)
+
+train_R.fre <- 1    #the frequence of return
+
+ts.ex_train <- Dive(exAll,TT,train_len,TES)[[1]]
+ts.stk_train <- Dive(stockAll,TT,train_len,TES)[[1]]
+
+ts.ex_test <- Dive(exAll,TT,train_len,TES)[[2]]
+ts.stk_test <- Dive(stockAll,TT,train_len,TES)[[2]]
+
+ts.all_train  <- MAKEmerge.C(ts.stk_train,ts.ex_train)
+
+head(ts.ex_train)
+tail(ts.ex_train)
+
+
+head(ts.ex_test)
+tail(ts.ex_test)
+
+
+#step-2:convert time series to R.fre-day log return
+
+
+df.logR_train <- To.logR(ts.all_train,R.len = train_R.fre, work = T)
+
+M.logR_S <- as.matrix(df.logR_train[,-1])
+
+M.AriR_S <- exp(M.logR_S) - 1
+
+#step-3:calculate the M.VAR_S, meanR.log_S and meanR.Ari_S
+
+M.VAR_S <- cov(M.logR_S)
+
+meanR.Log_S <- apply(M.logR_S, 2, mean)
+
+meanR.Ari_S <- exp(meanR.Log_S) - 1
+
+
+#step-4:setting the budget constraints and box
+#contraints for mco algorithm
+
+
+#4-1:setting budget constraints first
+
+RC_S <- eqR(aA = x0_unhedged, uA = eqU, meanR = meanR.Ari_S)*0.5
+
+if (RC_S < 0) {
+  RC_S <- eqR(x0_unhedged,eqU,meanR.Ari_S)
+}
+
+#4-2:construct the constraints functions for mco algorithm.
+
+cformco_all_S <- function(x){
+  return(c(cfor.R(aA = x,uA = eqU,meanR = meanR.Ari_S ,myC = RC_S),
+           cfor.box(aA = x, uA = eqU, C.U = l.up, C.L = l.low)))
+}
+
+#step-5:construct fitness function for solving R_VAR efficient
+#frontier
+
+multi.R_VAR_S <- function(x){
+  return(c(-eqR(aA = x, uA = eqU, meanR = meanR.Ari_S),
+           eqVAR(aA = x, uA = eqU, VAR.m = M.VAR_S)))
+}
+
+#step-6:solve the efficient frontier
+
+solRtoVAR_mco_S <-  mco::nsga2(fn = multi.R_VAR_S,
+                             idim = length(x0_unhedged),
+                             odim = 2,
+                             constraints = cformco_all_S,
+                             cdim = 3,
+                             lower.bounds = mylow,
+                             upper.bounds = myup,
+                             popsize = 600,
+                             generations = 1200)
+
+saveRDS(solRtoVAR_mco_S,"solRtoVAR_mco_S")
+
+#step-7:extra all portfolios of interest on the efficient
+#frontier
+
+#7-1:extra all the solutions on efficient frontier
+
+efsol.RtoVAR_S <- solRtoVAR_mco_S$par
+
+#7-2:derive the return and risk pairs on efficient frontier
+
+frontVAR.R_S <- c()
+
+for (i in 1:dim(efsol.RtoVAR_S)[1]) {
+  frontVAR.R_S[i] <- eqR(aA = efsol.RtoVAR_S[i,],
+                       uA = eqU,
+                       meanR = meanR.Ari_S)
+}
+
+frontVAR.VAR_S <- c()
+
+for (i in 1:dim(efsol.RtoVAR_S)[1]) {
+  frontVAR.VAR_S[i] <- eqVAR(aA = efsol.RtoVAR_S[i,],
+                           uA = eqU,
+                           VAR.m = M.VAR_S)
+}
+
+
+VARfront_S <- data.frame(R = frontVAR.R_S, VAR = frontVAR.VAR_S)
+
+RtoVAR.ratios_S <- VARfront_S$R/VARfront_S$VAR
+
+VARfront_S <- data.frame(VARfront_S,RtoVAR = RtoVAR.ratios_S,w = efsol.RtoVAR_S)
+
+VARfront_S <- VARfront_S[order(VARfront_S$VAR),]
+
+saveRDS(VARfront_S,"VARfront_S")
+
+#7-3:derive the optimal return-risk hedge ratio on
+#efficient frontier(maximum sharp ratio portfolio)
+
+bestRtoVAR_mco_S <- VARfront_S[VARfront_S$RtoVAR == max(VARfront_S$RtoVAR),
+                               4:dim(VARfront_S)[2]]
+
+bestRtoVAR_mco_S <- bestRtoVAR_mco_S[1,]
+
+bestRtoVAR_mco_S <- as.numeric(bestRtoVAR_mco_S)
+
+saveRDS(bestRtoVAR_mco_S,"bestRtoVAR_mco_S")
+
+#7-4:derive the risk-minimum hedge ratio (VAR)
+#on the efficient frontier
+
+bestVARmin_mco_S <- VARfront_S[VARfront_S$VAR == min(VARfront_S$VAR),
+                               4:dim(VARfront_S)[2]]
+
+bestVARmin_mco_S <- bestVARmin_mco_S[1,]
+
+bestVARmin_mco_S <- as.numeric(bestVARmin_mco_S)
+
+saveRDS(bestVARmin_mco_S,"bestVARmin_mco_S")
+
+#7-5:derive the recommaned return-risk hedge ratio (VAR)
+#on the efficient frontier
+
+x0_VAR_S <- eqVAR(aA = x0_unhedged,uA = eqU,VAR.m = M.VAR_S)
+
+#extra the portfolios with VAR less than unhedged portfolio
+VAR_less_S <- VARfront_S[VARfront_S$VAR <= x0_VAR_S,]
+
+bestVAR.B_mco_S <- VAR_less_S[VAR_less_S$RtoVAR == max(VAR_less_S$RtoVAR),
+                              4:dim(VAR_less_S)[2]]
+
+bestVAR.B_mco_S <- bestVAR.B_mco_S[1,]
+bestVAR.B_mco_S <- as.numeric(bestVAR.B_mco_S)
+
+saveRDS(bestVAR.B_mco_S,"bestVAR.B_mco_S")
+
+#7-6:extra the 75% quantile portfolio in VAR_less
+
+q75VAR_S <- quantile(VAR_less_S$VAR,0.75)
+
+MYq75s_S <- VAR_less_S[VAR_less_S$VAR <= q75VAR_S,]
+
+bestVAR.q75_mco_S <- MYq75s_S[MYq75s_S$VAR == max(MYq75s_S$VAR),]
+bestVAR.q75_mco_S <- bestVAR.q75_mco_S[1,]
+bestVAR.q75_mco_S <- as.numeric(bestVAR.q75_mco_S[,4:ncol(bestVAR.q75_mco_S)])
+
+saveRDS(bestVAR.q75_mco_S,"bestVAR.q75_mco_S")
+
+#step-8:plot the efficient frontier
+
+#8-1:determine the xlim
+
+value_X <- list()
+
+value_X[[1]] <- eqVAR(aA = x0_unhedged, uA = eqU, VAR.m = M.VAR_S)
+value_X[[2]] <- VARfront_S$VAR
+
+value_X <- unlist(value_X)
+
+x.length <- max(value_X)-min(value_X)
+
+x.st <- min(value_X) - x.length*0.05
+x.ed <- max(value_X) + x.length*0.05
+
+#8-2:determine the ylim
+
+value_Y <- list()
+
+value_Y[[1]] <- eqR(aA = x0_unhedged,uA = eqU, meanR = meanR.Ari_S)
+value_Y[[2]] <- VARfront_S$R
+
+value_Y <- unlist(value_Y)
+
+y.length <- max(value_Y) - min(value_Y)
+
+y.st <- min(value_Y) - y.length*0.05
+y.ed <- max(value_Y) + y.length*0.05
+
+
+#8-3:the efficient frointer generated by mco
+
+par(mar = c(5,4,4,8),
+    xpd = T)
+
+plot(VARfront_S$VAR,
+     VARfront_S$R,
+     xlab = "Expected Variance",
+     ylab = "Expected Return",
+     main = "Return-Variance Efficient Frontier",
+     type = "l",
+     xlim = c(x.st,x.ed),
+     ylim = c(y.st,y.ed))
+
+ourSOLs_S <- list(x0_unhedged,
+                bestVARmin_mco_S,
+                bestRtoVAR_mco_S,
+                bestVAR.q75_mco_S)
+
+ourLegends <- c("Unhedged","VAR.Min","Sharpe.Max","VAR.Q")
+
+ourPCHs <- c(4,2,11,1)
+
+ourColors <- c("purple","green","red","blue")
+
+for (i in 1:length(ourSOLs_S)) {
+  
+  points(eqVAR(ourSOLs_S[[i]],eqU,M.VAR_S),
+         eqR(ourSOLs_S[[i]],eqU,meanR.Ari_S),
+         pch = ourPCHs[i],
+         col = ourColors[i],
+         cex = 2)
+  
+}
+
+
+legend("right",
+       legend = ourLegends,
+       col = ourColors,
+       pch = ourPCHs,
+       cex = 1,
+       x.intersp = 0.7,
+       y.intersp = 1,
+       bty = "n",
+       inset = c(-0.35,0))
+
+#step-9:construct the fitness function for solving
+# R_SV efficient frontier
+
+multi.R_SV_S <- function(x){
+  return(c(-eqR(aA = x, uA = eqU, meanR = meanR.Ari_S),
+           eqSV(aA = x, uA = eqU, R.m = M.AriR_S)))
+}
+
+#step-10:solve the efficient frontier
+
+solRtoSV_mco_S <-  mco::nsga2(fn = multi.R_SV_S,
+                            idim = length(x0_unhedged),
+                            odim = 2,
+                            constraints = cformco_all_S,
+                            cdim = 3,
+                            lower.bounds = mylow,
+                            upper.bounds = myup,
+                            popsize = 600,
+                            generations = 1200
+)
+
+saveRDS(solRtoSV_mco_S,"solRtoSV_mco_S")
+
+
+#step-11:extra all the portfolios of interest out of
+#the R_SV efficient frontier
+
+#11-1:extra all the solutions on the efficient frontier.
+
+efsol.RtoSV_S <- solRtoSV_mco_S$par
+
+#11-2:derive the return and risk pairs on efficient frontier
+
+frontSV.R_S <- c()
+
+for (i in 1:dim(efsol.RtoSV_S)[1]) {
+  frontSV.R_S[i] <- eqR(aA = efsol.RtoSV_S[i,],
+                      uA = eqU,
+                      meanR = meanR.Ari_S)
+}
+
+frontSV.SV_S <- c()
+
+for (i in 1:dim(efsol.RtoSV_S)[1]) {
+  frontSV.SV_S[i] <- eqSV(aA = efsol.RtoSV_S[i,],
+                        uA = eqU,
+                        R.m = M.AriR_S)
+}
+
+
+
+SVfront_S <- data.frame(R = frontSV.R_S,SV = frontSV.SV_S)
+
+RtoSV.ratios_S <- SVfront_S$R/SVfront_S$SV
+
+SVfront_S <- data.frame(SVfront_S,RtoSV = RtoSV.ratios_S,
+                        w = efsol.RtoSV_S)
+
+SVfront_S <- SVfront_S[order(SVfront_S$SV),]
+
+saveRDS(SVfront_S,"SVfront_S")
+
+#11-3:derive the optimal return-risk hedge ratio(sv)
+#on efficient frontier
+
+bestRtoSV_mco_S <- SVfront_S[SVfront_S$RtoSV == max(SVfront_S$RtoSV),
+                             4:dim(SVfront_S)[2]]
+
+bestRtoSV_mco_S <- bestRtoSV_mco_S[1,]
+bestRtoSV_mco_S <- as.numeric(bestRtoSV_mco_S)
+
+saveRDS(bestRtoSV_mco_S,"bestRtoSV_mco_S")
+
+#11-4:derive the risk-minimum hedge ratio(sv) on
+#efficient frontier
+
+bestSVmin_mco_S <- SVfront_S[SVfront_S$SV == min(SVfront_S$SV),
+                             4:dim(SVfront_S)[2]]
+bestSVmin_mco_S <- bestSVmin_mco_S[1,]
+bestSVmin_mco_S <- as.numeric(bestSVmin_mco_S)
+
+saveRDS(bestSVmin_mco_S,"bestSVmin_mco_S")
+
+#11-5:derive the recommended return-risk hedge ratio(sv)
+#on efficient frontier
+
+x0_SV_S <- eqSV(x0_unhedged,eqU,M.AriR_S)
+
+#extra the portfolios with SV less than unhedged portfolio
+SV_less_S <- SVfront_S[SVfront_S$SV <= x0_SV_S,]
+
+bestSV.B_mco_S <- SV_less_S[SV_less_S$RtoSV == max(SV_less_S$RtoSV),
+                            4:dim(SV_less_S)[2]]
+
+bestSV.B_mco_S <- bestSV.B_mco_S[1,]
+
+bestSV.B_mco_S <- as.numeric(bestSV.B_mco_S)
+
+saveRDS(bestSV.B_mco_S,"bestSV.B_mco_S")
+
+#11-6:extra the 75% quantile portfolio in SV_less
+
+qSV75_S <- quantile(SV_less_S$SV,0.75)
+
+MYsv75q_S <- SV_less_S[SV_less_S$SV <= qSV75_S,]
+
+bestSV.q75_mco_S <- MYsv75q_S[MYsv75q_S$SV == max(MYsv75q_S$SV),]
+
+bestSV.q75_mco_S <- bestSV.q75_mco_S[1,]
+
+bestSV.q75_mco_S <- as.numeric(bestSV.q75_mco_S[,
+                                                4:ncol(bestSV.q75_mco_S)])
+
+saveRDS(bestSV.q75_mco_S,"bestSV.q75_mco_S")
+
+#step-12:plot the effcient frontier
+
+#12-1:determine the xlim
+
+value_X <- list()
+
+value_X[[1]] <- eqSV(aA = x0_unhedged, uA = eqU, R.m = M.AriR_S)
+value_X[[2]] <- SVfront_S$SV
+
+
+value_X <- unlist(value_X)
+
+x.length <- max(value_X)-min(value_X)
+
+x.st <- min(value_X) - x.length*0.05
+x.ed <- max(value_X) + x.length*0.05
+
+#12-2:determine the ylim
+
+value_Y <- list()
+
+value_Y[[1]] <- eqR(aA = x0_unhedged,uA = eqU, meanR = meanR.Ari_S)
+value_Y[[2]] <- SVfront_S$R
+
+value_Y <- unlist(value_Y)
+
+y.length <- max(value_Y) - min(value_Y)
+
+y.st <- min(value_Y) - y.length*0.05
+y.ed <- max(value_Y) + y.length*0.05
+
+
+
+#12-3:plot the efficient frointer generated by mco
+
+plot(SVfront_S$SV,
+     SVfront_S$R,
+     xlab = "Expected Semivariance",
+     ylab = "Expected Return",
+     main = "Return-Semivariance Efficient Frontier",
+     type = "l",
+     xlim = c(x.st,x.ed),
+     ylim = c(y.st,y.ed))
+
+
+
+ourSOLs_S_SV <- list(x0_unhedged,
+                bestSVmin_mco_S,
+                bestRtoSV_mco_S,
+                bestSV.q75_mco_S)
+
+for (i in 1:length(ourSOLs_S_SV)) {
+  
+  points(eqSV(ourSOLs_S_SV[[i]],eqU,M.AriR_S),
+         eqR(ourSOLs_S_SV[[i]],eqU,meanR.Ari_S),
+         pch = ourPCHs[i],
+         col = ourColors[i],
+         cex = 2)
+  
+}
+
+ourLegends <- c("Unhedged","SV.Min","Sharpe.Max","SV.Q")
+
+legend("right",
+       legend = ourLegends,
+       col = ourColors,
+       pch = ourPCHs,
+       cex = 1,
+       x.intersp = 0.7,
+       y.intersp = 1,
+       bty = "n",
+       inset = c(-0.35,0)
+)
+
+#12-4:calculate the vertical distance
+
+VAR_HR_S <- tail(VAR_less_S,1)$R
+SV_HR_S <- tail(SV_less_S,1)$R
+
+
+R0_sample.OUT <- eqR(aA = x0_unhedged, 
+                   uA = eqU, 
+                   meanR = meanR.Ari_S)
+
+V_VAR_S <- VAR_HR_S - R0_sample.OUT
+V_SV_S <- SV_HR_S - R0_sample.OUT
+
+(V_SV_S - V_VAR_S)/V_VAR_S
+
+V_VAR_S
+V_SV_S
+
+
+#######################
+#Out-of-sample test
+#######################
+
+#step-1:Determine which hedge strategy is going to be
+#used in back test
+
+minVAR_S <- bestVARmin_mco_S
+minSV_S <- bestSVmin_mco_S
+
+q.VAR_S <- bestVAR.q75_mco_S
+q.SV_S <- bestSV.q75_mco_S
+
+#step-2:convert solution to hedge ratio
+
+
+h.no_S <- SOLtoH(tg = x0_unhedged,uh = x0_unhedged)
+h.VARmin_S <- SOLtoH(tg = minVAR_S,uh = x0_unhedged)
+h.SVmin_S <- SOLtoH(tg = minSV_S,uh = x0_unhedged)
+h.VARq_S <- SOLtoH(tg = q.VAR_S, uh = x0_unhedged)
+h.SVq_S <- SOLtoH(tg = q.SV_S, uh = x0_unhedged)
+
+hedge.ratios_out <- rbind(h.no_S,
+                          h.VARmin_S,
+                          h.SVmin_S,
+                          h.VARq_S,
+                          h.SVq_S)
+
+colnames(hedge.ratios_out) <- colnames(ts.ex_train)[c(-1,-ncol(ts.ex_train))]
+
+saveRDS(hedge.ratios_out,"hedge.ratios_out")
+
+rio::export(hedge.ratios_out,"hedge.ratios_out.xlsx",row.names = T)
+
+
+#step-3:obtain actual portflio
+
+asset.names_S <- colnames(df.logR_train)[-1]
+
+pNO_S <- HtoP(h.no_S,pGiven,asset.names_S)
+pVARmin_S <- HtoP(h.VARmin_S,pGiven,asset.names_S)
+pSVmin_S <- HtoP(h.SVmin_S,pGiven,asset.names_S)
+pVARq_S <- HtoP(h.VARq_S,pGiven,asset.names_S)
+pSVq_S <- HtoP(h.SVq_S,pGiven,asset.names_S)
+
+testPOFs.out <- rbind(pNO_S,pVARmin_S,pSVmin_S,pVARq_S,pSVq_S)
+
+hedgeNames <- c("Unhedged","VAR.Min","SV.Min","VAR.Q","SV.Q")
+
+testPOFs.out <- data.frame(POF = hedgeNames,testPOFs.out[,-1])
+
+saveRDS(testPOFs.out,"testPOFs.out")
+
+#step-4:run the back test
+
+#4-1:merge stock index time series and
+#exchange rate time series data first
+
+ts.all_test <- MAKEmerge.C(ts.stk_test,ts.ex_test)
+
+#4-2:run the back test function
+
+bk_NO.out <- backtest(pof = pNO_S,d.ts = ts.all_test)
+bk_VARmin.out <- backtest(pof = pVARmin_S,d.ts = ts.all_test)
+bk_SVmin.out <- backtest(pof = pSVmin_S,d.ts = ts.all_test)
+bk_VARq.out <- backtest(pof = pVARq_S,d.ts = ts.all_test)
+bk_SVq.out <- backtest(pof = pSVq_S,d.ts = ts.all_test)
+
+#step-5:plot the back test result.
+
+#5-1:determine the ylim
+
+value_Y <- list()
+
+mybt_out <- list(bk_NO.out,
+                bk_VARmin.out,
+                bk_SVmin.out,
+                bk_VARq.out,
+                bk_SVq.out)
+
+names(mybt_out) <- c("Unhedged",
+                    "VAR.Min",
+                    "SV.Min",
+                    "VAR.Q",
+                    "SV.Q")
+
+saveRDS(mybt_out,"mybt_out")
+
+for (i in 1:length(mybt_out)) {
+  value_Y[[i]] <- mybt_out[[i]]$R 
+}
+
+value_Y <- unlist(value_Y)
+
+y.length <- max(value_Y) - min(value_Y)
+
+y.st <- min(value_Y) - y.length*0.05
+y.ed <- max(value_Y) + y.length*0.05
+
+#5-2:plot the unhedged portfolio
+
+plot(bk_NO.out$Date,bk_NO.out$R,ylim = c(y.st,y.ed),type = "l",
+     xlab = "Date",
+     ylab = "Portfolio Value",
+     main = "Backtest ( Out of Sample )")
+
+myLabels <- names(mybt_out)
+
+myLTYs <- c(1,1,1,1,1)
+
+myCOls <- c("Black","green","blue","red","orange")
+
+for (i in 2:length(myLabels)) {
+  lines(mybt_out[[i]]$Date,mybt_out[[i]]$R,col = myCOls[i])
+}
+
+legend("right",legend = myLabels,col = myCOls,lty = myLTYs,
+       cex = 0.8,
+       y.intersp = 1,
+       x.intersp = 0.3,
+       bty = "n",
+       inset = c(-0.27,0))
+
+
+##################################
+#Out of Sample Back Test Analysis#
+##################################
+
+#step-1:merge all backtest result into one data.frame
+
+fen_out <- data.frame(Date = mybt_out$Unhedge$Date,
+                     unhedged = mybt_out$Unhedge$R,
+                     VARmin = mybt_out$VAR.Min$R,
+                     SVmin = mybt_out$SV.Min$R,
+                     VAR.q = mybt_out$VAR.Q$R,
+                     SV.q = mybt_out$SV.Q$R)
+
+head(data.frame(Day = weekdays(fen_out$Date),fen_out),15)
+
+
+#step-2:obtain the final return of each portfolio
+
+
+
+Final.Return_out <- fen_out[nrow(fen_out),-1]
+
+Final.Return_out <- Final.Return_out - 1
+
+rownames(Final.Return_out) <- "Final Return"
+
+
+#step-3:determin k.out and w.out
+
+k.out <- 1
+w.out <- 7
+
+#step-4:analyses the return performance
+
+#4-1:calculate the k-day log return(weekend excluded)
+
+
+rLOG.k_out <- To.logR.bt(fen_out,R.len = k.out)
+
+head(data.frame(Day = weekdays(rLOG.k_out$Date),rLOG.k_out),14)
+
+#4-2:calculate the mean of k-day log return
+
+rLOG.k_out.mean <- apply(rLOG.k_out[,-1], 2, mean)
+
+rLOG.k_out.mean <- matrix(rLOG.k_out.mean,nrow = 1,byrow = T,
+                         dimnames = list("LogR.k.mean",names(rLOG.k_out.mean)))
+
+
+rLOG.k_out.mean <- as.data.frame(rLOG.k_out.mean)
+
+rLOG.k_out.mean
+
+#4-3:t-test on k-day log return
+
+BKnames <- colnames(rLOG.k_out)[-1]
+
+rLOG.k_out.Ttest <- list()
+
+for (i in 1:length(BKnames)) {
+  
+  result_T <- t.test(rLOG.k_out[,2],rLOG.k_out[,i+1])
+  rLOG.k_out.Ttest[[i]] <- result_T$p.value
+  
+}
+
+rLOG.k_out.Ttest <- do.call(cbind,rLOG.k_out.Ttest)
+
+dimnames(rLOG.k_out.Ttest) <- list("LogR.k.Ttest",BKnames)
+
+rLOG.k_out.Ttest
+
+#4-4:calculate the mean of daily Cumulative return
+
+
+DCR_out <- fen_out[!weekdays(fen_out$Date)%in% Wochenende,]
+DCR_out[,-1] <- DCR_out[,-1] - 1
+
+
+DCR_out.mean <- matrix(apply(DCR_out[,-1],2,mean),nrow = 1,byrow = T,
+                      dimnames = list("DCR.mean",colnames(DCR_out)[-1]))
+DCR_out.mean
+
+
+#4-5:do a t test on DCR_out
+
+BKnames <-  colnames(DCR_out)[-1]
+
+DCR_out.Ttest <- list()
+
+for (i in 1:length(BKnames)) {
+  
+  result_T <- t.test(DCR_out[,2],DCR_out[,i+1])
+  DCR_out.Ttest[[i]] <- result_T$p.value
+  
+}
+
+DCR_out.Ttest <- do.call(cbind,DCR_out.Ttest)
+dimnames(DCR_out.Ttest) <- list("DCR.Ttest",BKnames)
+
+DCR_out.Ttest
+
+#4-5:rbind all data.frame and finish the
+#return performance analysis
+
+Final.Return_out
+rLOG.k_out.mean
+rLOG.k_out.Ttest
+DCR_out.mean
+DCR_out.Ttest
+
+Perform.R_out <- rbind(Final.Return_out,
+                   rLOG.k_out.mean,
+                   rLOG.k_out.Ttest,
+                   DCR_out.mean,
+                   DCR_out.Ttest)
+
+saveRDS(Perform.R_out,"Perform.R_out")
+
+Perform.R_out
+
+rio::export(Perform.R_out,"Perform.R_out.xlsx",row.names = T)
+
+
+#step-5:start analysing risk performance
+
+#5-1:calculate the maximum loss.
+
+mml_out <- matrix(MML(fen_out),nrow = 1,byrow = T)
+
+dimnames(mml_out) <- list("MML",colnames(fen_out)[-1])
+
+mml_out <- as.data.frame(mml_out)
+
+mml_out
+
+#5-2:calculate the maximum dropdown
+
+
+mdd_out <- MDD(fen_out)
+
+mdd_out <- matrix(mdd_out,nrow = 1,byrow = T,
+                 dimnames = list("MDD",colnames(fen_out[-1])))
+
+mdd_out <- as.data.frame(mdd_out)
+
+mdd_out
+
+#5-3:calculate the variance of k-days log return
+
+rLOG.k_out.VAR <- apply(rLOG.k_out[,-1], 2, var)
+
+
+rLOG.k_out.VAR <- matrix(rLOG.k_out.VAR,nrow = 1,byrow = T,
+                        dimnames = list("logR.k.VAR",
+                                        colnames(rLOG.k_out)[-1]))
+
+
+rLOG.k_out.VAR <- as.data.frame(rLOG.k_out.VAR)
+
+rLOG.k_out.VAR
+
+
+#5-4:calculate the semi-variance of k-day log return
+
+
+rLOG.k_out.semiVAR <- apply(rLOG.k_out[,-1], 2, semiVAR)
+
+rLOG.k_out.semiVAR <- matrix(rLOG.k_out.semiVAR,nrow = 1, byrow = T,
+                            dimnames = list("logR.k.semiVAR",
+                                            colnames(rLOG.k_out)[-1]))
+
+rLOG.k_out.semiVAR <- as.data.frame(rLOG.k_out.semiVAR)
+
+rLOG.k_out.semiVAR
+
+#5-5:calculate the rolling variance of w-day log return
+
+#5-5-1:setting the window lenth
+
+rol.length <- w.out
+
+bt.log.daily_out <- To.logR.bt(fen_out,R.len = 1)
+
+
+#5-5-2:calculate the rolling variance
+
+rLOG_out.rolVAR <- zoo::rollapply(bt.log.daily_out[,-1],
+                                 width = rol.length,
+                                 var)
+
+rol.st <- nrow(bt.log.daily_out) - nrow(rLOG_out.rolVAR) + 1
+
+rLOG_out.rolVAR <- data.frame(Date = bt.log.daily_out$Date[rol.st:nrow(bt.log.daily_out)],
+                             rLOG_out.rolVAR)
+
+dim(bt.log.daily_out) - dim(rLOG_out.rolVAR)
+
+
+#step-6:plot the line graph
+
+#6-1:determine the ylim
+
+value_Y <- list()
+
+for (i in 1:(ncol(rLOG_out.rolVAR)-1)) {
+  
+  value_Y[[i]] <- rLOG_out.rolVAR[,i+1]
+  
+}
+
+value_Y <- unlist(value_Y)
+
+y.length <- max(value_Y) - min(value_Y)
+
+y.st <- min(value_Y) - y.length*0.05
+y.ed <- max(value_Y) + y.length*0.05
+
+#6-2:plotting
+
+plot(rLOG_out.rolVAR$Date,rLOG_out.rolVAR$unhedged,type = "l",
+     main = "7-day Rolling Average Variance of Daily Log Return",
+     xlab = "Date",
+     ylab = "Variance",
+     ylim = c(y.st,y.ed)
+)
+
+
+myColar <- c("black","green","blue","red","orange")
+
+for (i in 1:length(myColar)) {
+  lines(rLOG_out.rolVAR$Date,rLOG_out.rolVAR[,i+1],col = myColar[i])
+}
+
+
+
+legend("right",legend = myLabels,col = myColar,lty = myLTYs,
+       cex = 1,
+       y.intersp = 1,
+       x.intersp = 0.7,
+       bty = "n",
+       inset = c(-0.35,0))
+
+#step-7:calculate the mean of rolling VAR
+
+rolVAR_mean.out <- matrix(apply(rLOG_out.rolVAR[,-1], 2, mean),nrow = 1,byrow = T,
+                      dimnames = list("rolVAR_mean",colnames(rLOG_out.rolVAR)[-1]))
+
+rolVAR_mean.out
+
+#step-8:t test on rolling VAR
+
+rolVAR_t.Test.out <- matrix(rep(NA,ncol(rLOG_out.rolVAR)-1),byrow = T,
+                        nrow = 1,
+                        dimnames = list("rolVAR_P",colnames(rLOG_out.rolVAR)[-1]))
+
+
+for (i in 1:ncol(rolVAR_t.Test.out)) {
+  
+  myTEST <- t.test(rLOG_out.rolVAR[,2],rLOG_out.rolVAR[,1+i])
+  rolVAR_t.Test.out[1,i] <- myTEST$p.value
+  
+}
+
+rolVAR_t.Test.out
+
+#step-9:calculate rolling W-day semi-variance
+
+rLOG_out.rolsemiVAR <- zoo::rollapply(bt.log.daily_out[,-1],
+                                     width = rol.length,semiVAR)
+
+rLOG_out.rolsemiVAR <- data.frame(Date = bt.log.daily_out$Date[rol.st:nrow(bt.log.daily_out)],
+                                  rLOG_out.rolsemiVAR)
+
+
+dim(bt.log.daily_out) - dim(rLOG_out.rolsemiVAR)
+
+
+#step-10:calculate the mean of rolling semi-variance
+
+rolsemiVAR_mean.out <- matrix(apply(rLOG_out.rolsemiVAR[,-1], 2, mean),
+                              nrow = 1,
+                              byrow = T,
+                          dimnames = list("rolsemiVAR_mean",
+                                          colnames(rLOG_out.rolsemiVAR)[-1]))
+
+rolsemiVAR_mean.out
+
+#step-11:plot the rolling semi-variance
+
+value_Y <- list()
+
+for (i in 1:(ncol(rLOG_out.rolsemiVAR)-1)) {
+  
+  value_Y[[i]] <- rLOG_out.rolsemiVAR[,i+1]
+  
+}
+
+value_Y <- unlist(value_Y)
+
+y.length <- max(value_Y) - min(value_Y)
+
+y.st <- min(value_Y) - y.length*0.05
+y.ed <- max(value_Y) + y.length*0.05
+
+plot(rLOG_out.rolVAR$Date,rLOG_out.rolsemiVAR$unhedged,type = "l",
+     xlab = "Date",
+     ylab = "Semivariance",
+     main = "7-day Rolling Average SV of Daily Log Return",
+     ylim = c(y.st,y.ed))
+
+for (i in 1:length(myColar)) {
+  lines(rLOG_out.rolsemiVAR$Date,rLOG_out.rolsemiVAR[,i+1],col = myColar[i])
+}
+
+legend("right",legend = myLabels,col = myColar,lty = myLTYs,
+       cex = 1,
+       y.intersp = 1,
+       x.intersp = 0.7,
+       bty = "n",
+       inset = c(-0.35,0))
+
+
+
+#step-12:t-test on rolling semi-variance
+
+rolsemiVAR_t.Test.out <- matrix(rep(NA,ncol(rLOG_out.rolsemiVAR)-1),
+                                byrow = T,
+                            nrow = 1,
+                            dimnames = list("rolsemiVAR_P",
+                                            colnames(rLOG_out.rolsemiVAR)[-1]))
+
+
+for (i in 1:ncol(rolsemiVAR_t.Test.out)) {
+  
+  myTEST <- t.test(rLOG_out.rolsemiVAR[,2],rLOG_out.rolsemiVAR[,i+1])
+  rolsemiVAR_t.Test.out[1,i] <- myTEST$p.value
+  
+}
+
+rolsemiVAR_t.Test.out
+
+#step-13:summarize the risk performence
+
+Perform.risk.out <- list(mml_out,
+                         mdd_out,
+                     rLOG.k_out.VAR,
+                     rolVAR_mean.out,
+                     rolVAR_t.Test.out,
+                     rLOG.k_out.semiVAR,
+                     rolsemiVAR_mean.out,
+                     rolsemiVAR_t.Test.out)
+
+Perform.risk.out <- do.call(rbind,Perform.risk.out)
+
+saveRDS(Perform.risk.out,"Perform.risk.out")
+
+Perform.risk.out
+
+rio::export(Perform.risk.out,"Perform.risk.out.xlsx",row.names = T)
+
+
+#step14:t test between SV and VAR regarding k-day
+# log return
+
+
+rLOG.k_out$VARmin
+rLOG.k_out$SVmin
+
+P.VARmin.vs.SVmin_logR.out <- t.test(rLOG.k_out$VARmin,
+                                     rLOG.k_out$SVmin)$p.value
+
+rLOG.k_out$VAR.q
+rLOG.k_out$SV.q
+
+P.VARq.vs.SVq_logR.out <- t.test(rLOG.k_out$VAR.q,
+                                 rLOG.k_out$SV.q)$p.value
+
+#step-15:VAR vs SV regarding daily cumulative return
+
+DCR_out$VARmin
+DCR_out$SVmin
+
+P.VARmin.vs.SVmin_DCR.out <- t.test(DCR_out$VARmin,
+                                    DCR_out$SVmin)$p.value
+
+P.VARq.vs.SVq_DCR.out <- t.test(DCR_out$VAR.q,
+                                DCR_out$SV.q)$p.value
+
+
+#step-16:save P value of VAR vs SV in return performence
+
+
+VAR.vs.SV_R.out <- rbind(P.VARmin.vs.SVmin_logR.out,
+                        P.VARq.vs.SVq_logR.out,
+                        P.VARmin.vs.SVmin_DCR.out,
+                        P.VARq.vs.SVq_DCR.out)
+
+colnames(VAR.vs.SV_R.out) <- "P.value"
+
+
+saveRDS(VAR.vs.SV_R.out,"VAR.vs.SV_R.out")
+
+rio::export(VAR.vs.SV_R.out,"VAR.vs.SV_R.out.xlsx",row.names = T)
+
+#step-17: t test on the risk performance between VAR and
+#SV
+
+P.VARmin.vs.SVmin_rolVAR.out <- t.test(rLOG_out.rolVAR$VARmin,
+                                      rLOG_out.rolVAR$SVmin)$p.value
+
+P.VARq.vs.SVq_rolVAR.out <- t.test(rLOG_out.rolVAR$VAR.q,
+                                  rLOG_out.rolVAR$SV.q)$p.value
+
+
+P.VARmin.vs.SVmin_rolsemiVAR.out <- t.test(rLOG_out.rolsemiVAR$VARmin,
+                                          rLOG_out.rolsemiVAR$SVmin)$p.value
+
+P.VARq.vs.SVq_rolsemiVAR.out <- t.test(rLOG_out.rolsemiVAR$VAR.q,
+                                      rLOG_out.rolsemiVAR$SV.q)$p.value
+
+
+VAR.vs.SV_Risk.out <- rbind(P.VARmin.vs.SVmin_rolVAR.out,
+                           P.VARq.vs.SVq_rolVAR.out,
+                           P.VARmin.vs.SVmin_rolsemiVAR.out,
+                           P.VARq.vs.SVq_rolsemiVAR.out)
+
+colnames(VAR.vs.SV_Risk.out) <- "P.value"
+
+
+saveRDS(VAR.vs.SV_Risk.out,"VAR.vs.SV_Risk.out")
+
+rio::export(VAR.vs.SV_Risk.out,"VAR.vs.SV_Risk.out.xlsx",row.names = T)
+
+#step-17:return deviation analysis
+
+AC.logR.k <- To.logR(ts.all_test,R.len = train_R.fre)
+
+AC.logR.k.mean <- apply(AC.logR.k[,-1], 2, mean)
+
+AC.Ari_R.k.mean <- exp(AC.logR.k.mean) - 1
+
+AC.vs.S_R <- rbind(meanR.Ari_S,AC.Ari_R.k.mean)
+
+
+
+saveRDS(AC.vs.S_R,"AC.vs.S_R")
+
+eqR(aA = x0_unhedged,uA = eqU, meanR = meanR.Ari_S)
+eqR(aA = bestVARmin_mco,uA = eqU, meanR = meanR.Ari_S)
+eqR(aA = bestVAR.q75_mco_S,uA = eqU, meanR = meanR.Ari_S)
+
+eqR(aA = x0_unhedged,uA = eqU, meanR = AC.Ari_R.k.mean)
+eqR(aA = bestVARmin_mco,uA = eqU, meanR = AC.Ari_R.k.mean)
+eqR(aA = bestVAR.q75_mco_S,uA = eqU, meanR = AC.Ari_R.k.mean)
+
+
+#step-18:covariance deviation
+
+AC.logR.k[,-1]
+M.VAR_AC <- cov(AC.logR.k[,-1])
+
+eqVAR(aA = bestVARmin_mco_S, uA = eqU, VAR.m = M.VAR_S)
+eqVAR(aA = bestVARmin_mco_S, uA = eqU, VAR.m = M.VAR_AC)
+
+var.Decompose(aA = bestVARmin_mco_S, uA = eqU, M.VAR = M.VAR_AC)
+var.Decompose(aA = bestVARmin_mco_S, uA = eqU, M.VAR = M.VAR_S)
+
+myAC.VAR <- var.Decompose(aA = x0_unhedged, uA = eqU, M.VAR = M.VAR_AC)
+var.Decompose(aA = x0_unhedged, uA = eqU, M.VAR = M.VAR_S)
+
+rio::export(myAC.VAR,"myAC.VAR.xlsx",row.names = T)
+
+
+#step-19:citation
+
+
+citation("mco")
+citation("tidyr")
+citation("rio")
+citation("zoo")
+citation()
